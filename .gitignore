@@ -1,0 +1,18 @@
+*.log
+.DS_Store
+.vscode/
+*.tmp
+
+# Never commit secrets, even if someone drops them here by accident.
+.env
+.env.*
+secrets/
+*.key
+*.pem
+id_ed25519
+id_ed25519.pub
+id_rsa
+id_rsa.pub
+.fh-token
+.git-credentials
+*.token
