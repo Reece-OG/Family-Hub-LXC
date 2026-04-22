@@ -39,6 +39,19 @@ mkdir -p "$STATE_DIR"
 chgrp "$SERVICE_USER" "$STATE_DIR" 2>/dev/null || true
 chmod 775 "$STATE_DIR"
 
+# Git 2.35+ refuses to operate on repos it doesn't think belong to the invoking
+# user unless the path is in safe.directory. On native installs /opt/family-hub
+# is chown'd to familyhub but we run here as root, so git's rev-parse / fetch
+# would fail with "detected dubious ownership" — which state-helper then
+# surfaces as a misleading "not a git checkout" error. Mark the install dir
+# safe for root, idempotently (don't grow the config with duplicates).
+if [[ -d "${INSTALL_DIR}/.git" ]]; then
+  if ! git config --global --get-all safe.directory 2>/dev/null \
+      | grep -qxF "$INSTALL_DIR"; then
+    git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
+  fi
+fi
+
 # --- Small JSON-writer helpers ------------------------------------------------
 # We avoid taking a hard dep on jq: the only user-controlled strings we ever
 # embed are short status labels, SHAs (hex), and truncated log tails. For the
