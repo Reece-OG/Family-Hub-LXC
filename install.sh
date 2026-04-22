@@ -51,8 +51,9 @@
 #    CTID HOSTNAME CORES MEMORY DISK_GB STORAGE BRIDGE NET TIMEZONE
 #    FH_REPO FH_BRANCH FH_AUTH FH_TOKEN FH_METHOD APP_NAME FH_IPV6
 #
-#  FH_IPV6 defaults to "no" - the container is given ip6=none and the kernel
-#  is told to disable IPv6 on eth0. This is because many home LANs advertise
+#  FH_IPV6 defaults to "no" - the container is given ip6=manual (pct has no
+#  "none" value) and the kernel is told to disable IPv6 on eth0. This is
+#  because many home LANs advertise
 #  IPv6 via SLAAC but don't actually route it upstream; Node's built-in fetch
 #  then picks the AAAA address and hangs on any outbound call. Set FH_IPV6=yes
 #  only if you have working IPv6 end-to-end and want the CT to use it.
@@ -378,14 +379,17 @@ if [[ "$NET" == "dhcp" ]]; then
 else
   NET0="${NET0},ip=${NET}"
 fi
-# IPv6 off unless explicitly enabled. ip6=none tells Proxmox's network-start
-# scripts not to configure v6 on the interface — no DHCPv6, no SLAAC address.
-# Combined with disable_ipv6=1 via sysctl below, this stops the kernel from
-# accepting router advertisements too, which is the actual root cause of
-# Node's fetch hanging (the CT gets a global v6 address via RA that it can't
-# reach anything with).
+# IPv6 off unless explicitly enabled. `pct` has no `ip6=none` value — valid
+# ip6 values are only `auto`, `dhcp`, `manual`, or an IPv6 CIDR — so the way
+# you "disable" v6 at the config level is to simply not set the ip6 key at
+# all. We also add `ip6=manual` for v6=no so Proxmox's network-start scripts
+# don't touch v6; either approach works, and `manual` is slightly more
+# explicit in the resulting /etc/pve/lxc/<CTID>.conf. The *actual* v6
+# disable (stopping the kernel from accepting router advertisements, which
+# is what makes Node's fetch hang) is done via the sysctl drop-in inside the
+# CT, a bit further down.
 if [[ "${IPV6:-no}" != "yes" ]]; then
-  NET0="${NET0},ip6=none"
+  NET0="${NET0},ip6=manual"
 fi
 
 # Modern Debian (13+) ships systemd 257, which won't cleanly bring up networkd
@@ -434,7 +438,7 @@ for i in {1..45}; do
 done
 
 # ---------- disable IPv6 inside the CT (unless FH_IPV6=yes) -------------------
-# ip6=none on the interface stops Proxmox's network scripts from configuring
+# ip6=manual on the interface stops Proxmox's network scripts from configuring
 # v6, but the kernel will still accept router advertisements on its own. Drop
 # a sysctl.d file inside the CT to fully disable v6 on eth0 + all so Node's
 # fetch can't pick up a dead AAAA path.
