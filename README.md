@@ -100,6 +100,7 @@ Optional extras:
 
 - `DISK_GB` — defaults to **32 GB** to leave room for the photo gallery, recipes and Postgres dumps. Override up or down as needed.
 - `DNS` — leave unset/blank to inherit the Proxmox host's `/etc/resolv.conf` (recommended). Set to a space-separated list (`DNS="1.1.1.1 8.8.8.8"`) to override.
+- `FH_IPV6` — defaults to **no**. Most home networks advertise IPv6 via SLAAC but don't route it upstream, which causes Node's `fetch` to hang on AAAA records (the weather widget is the first thing to break). The installer adds `ip6=none` to the CT's net config *and* drops a sysctl file inside the CT to fully disable v6 on `eth0`. Set `FH_IPV6=yes` only if your LAN actually routes IPv6 end-to-end.
 - `CT_PASSWORD` — optional root password for the container. Leave unset to skip; you can always shell in with `pct enter <CTID>` from the host.
 
 For a static IP instead of DHCP:

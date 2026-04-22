@@ -49,7 +49,13 @@
 #
 #  Any of these env vars pre-seed the wizard / defaults:
 #    CTID HOSTNAME CORES MEMORY DISK_GB STORAGE BRIDGE NET TIMEZONE
-#    FH_REPO FH_BRANCH FH_AUTH FH_TOKEN FH_METHOD APP_NAME
+#    FH_REPO FH_BRANCH FH_AUTH FH_TOKEN FH_METHOD APP_NAME FH_IPV6
+#
+#  FH_IPV6 defaults to "no" - the container is given ip6=none and the kernel
+#  is told to disable IPv6 on eth0. This is because many home LANs advertise
+#  IPv6 via SLAAC but don't actually route it upstream; Node's built-in fetch
+#  then picks the AAAA address and hangs on any outbound call. Set FH_IPV6=yes
+#  only if you have working IPv6 end-to-end and want the CT to use it.
 # =============================================================================
 set -euo pipefail
 
@@ -110,6 +116,12 @@ DEFAULT_NET="${NET:-dhcp}"
 # usually what you want. Set DNS to a space-separated list (e.g. "1.1.1.1
 # 8.8.8.8") only if you want to override the host's resolvers.
 DEFAULT_DNS="${DNS:-}"
+# IPv6 on the CT is disabled by default. On most home LANs the router
+# advertises IPv6 via SLAAC but doesn't actually route outbound v6, which
+# causes Node's dual-stack fetch to try AAAA records and hang (the weather
+# widget is the most visible victim). Set FH_IPV6=yes only if you know your
+# IPv6 works end-to-end.
+DEFAULT_IPV6="${FH_IPV6:-no}"
 DEFAULT_TIMEZONE="${TIMEZONE:-$(cat /etc/timezone 2>/dev/null || echo 'UTC')}"
 # Optional root password inside the container. Leave blank to skip (you can
 # still enter the CT via `pct enter <CTID>` from the Proxmox host).
@@ -139,6 +151,7 @@ if [[ "$MODE" == "default" ]]; then
   BRIDGE="$DEFAULT_BRIDGE"
   NET="$DEFAULT_NET"
   DNS="$DEFAULT_DNS"
+  IPV6="$DEFAULT_IPV6"
   TIMEZONE="$DEFAULT_TIMEZONE"
   CT_PASSWORD="$DEFAULT_CT_PASSWORD"
   FH_REPO="$DEFAULT_FH_REPO"
@@ -234,6 +247,21 @@ Leave blank to inherit the Proxmox host's DNS settings
 (recommended — the CT will use the same resolvers as the host)."
   DNS=$(whiptail --title "DNS servers (optional)" --inputbox "$DNS_HELP" 14 72 "$DEFAULT_DNS" 3>&1 1>&2 2>&3) || DNS=""
 
+  # IPv6 is an advanced toggle — most home setups should keep it disabled,
+  # because SLAAC-advertised IPv6 with no upstream route breaks Node fetch.
+  # We surface it as a simple yes/no menu so the reasoning is visible.
+  IPV6=$(whiptail --title "IPv6" --menu \
+"Enable IPv6 on the container?
+
+Most home networks advertise IPv6 via SLAAC but don't route it upstream,
+which causes Node's fetch to hang when resolving AAAA records. Unless you
+have IPv6 working end-to-end, keep this disabled.
+
+Default: no (recommended)." 17 72 2 \
+    "no"  "Disable IPv6 on the CT (recommended)" \
+    "yes" "Allow IPv6 (only if your LAN actually routes it)" \
+    3>&1 1>&2 2>&3) || IPV6="$DEFAULT_IPV6"
+
   TIMEZONE=$(whiptail --title "Timezone" --inputbox "Timezone (tz database name):" 8 60 "$DEFAULT_TIMEZONE" 3>&1 1>&2 2>&3) || exit 1
 
   # Optional root password. If set, you can log into the CT at the Proxmox
@@ -296,6 +324,7 @@ The token will only be stored inside the new LXC (mode 600)." 15 72 "" 3>&1 1>&2
   Bridge    : ${BRIDGE}
   Network   : ${NET}
   DNS       : ${DNS:-<inherit from host>}
+  IPv6      : ${IPV6}
   Timezone  : ${TIMEZONE}
   Root pwd  : $([[ -n "$CT_PASSWORD" ]] && echo "set" || echo "not set (use pct enter)")
   Repo auth : ${FH_AUTH}
@@ -349,6 +378,15 @@ if [[ "$NET" == "dhcp" ]]; then
 else
   NET0="${NET0},ip=${NET}"
 fi
+# IPv6 off unless explicitly enabled. ip6=none tells Proxmox's network-start
+# scripts not to configure v6 on the interface — no DHCPv6, no SLAAC address.
+# Combined with disable_ipv6=1 via sysctl below, this stops the kernel from
+# accepting router advertisements too, which is the actual root cause of
+# Node's fetch hanging (the CT gets a global v6 address via RA that it can't
+# reach anything with).
+if [[ "${IPV6:-no}" != "yes" ]]; then
+  NET0="${NET0},ip6=none"
+fi
 
 # Modern Debian (13+) ships systemd 257, which won't cleanly bring up networkd
 # in an unprivileged CT without `nesting=1` — without it the CT never gets DNS
@@ -394,6 +432,29 @@ for i in {1..45}; do
   sleep 2
   [[ $i -eq 45 ]] && die "CT never got working DNS - check bridge / network config."
 done
+
+# ---------- disable IPv6 inside the CT (unless FH_IPV6=yes) -------------------
+# ip6=none on the interface stops Proxmox's network scripts from configuring
+# v6, but the kernel will still accept router advertisements on its own. Drop
+# a sysctl.d file inside the CT to fully disable v6 on eth0 + all so Node's
+# fetch can't pick up a dead AAAA path.
+if [[ "${IPV6:-no}" != "yes" ]]; then
+  msg "Disabling IPv6 inside CT (set FH_IPV6=yes to keep it on)..."
+  pct exec "$CTID" -- bash -c '
+    set -e
+    mkdir -p /etc/sysctl.d
+    cat >/etc/sysctl.d/99-familyhub-no-ipv6.conf <<EOF
+# Installed by Family-Hub-LXC: IPv6 is disabled because the host LAN
+# advertises v6 via SLAAC but does not route it upstream, which breaks
+# Node fetch. Remove this file and reboot the CT to re-enable IPv6.
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.eth0.disable_ipv6 = 1
+EOF
+    sysctl -p /etc/sysctl.d/99-familyhub-no-ipv6.conf >/dev/null
+  '
+  ok "IPv6 disabled."
+fi
 
 # ---------- set root password (if supplied) -----------------------------------
 # Using `chpasswd` with the password piped on stdin keeps it off the process
