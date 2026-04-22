@@ -531,6 +531,23 @@ pct push "$CTID" "$TMP_SETUP" /root/setup.sh
 rm -f "$TMP_SETUP"
 pct exec "$CTID" -- chmod +x /root/setup.sh
 
+# Push state-helper.sh — the privileged worker that the in-app update flow
+# calls via systemd path+service units. setup-${method}.sh installs it to
+# /opt/family-hub/state-helper.sh and wires up the systemd units.
+TMP_HELPER="$(mktemp)"
+if [[ -n "$SCRIPT_DIR" ]] && [[ -f "$SCRIPT_DIR/state-helper.sh" ]]; then
+  cp "$SCRIPT_DIR/state-helper.sh" "$TMP_HELPER"
+  ok "Using local state-helper.sh from ${SCRIPT_DIR}."
+else
+  if ! wget -qLO "$TMP_HELPER" "https://github.com/Reece-OG/Family-Hub-LXC/raw/main/state-helper.sh"; then
+    die "Could not download state-helper.sh from GitHub."
+  fi
+  ok "Downloaded state-helper.sh from GitHub."
+fi
+pct push "$CTID" "$TMP_HELPER" /root/state-helper.sh
+rm -f "$TMP_HELPER"
+pct exec "$CTID" -- chmod 755 /root/state-helper.sh
+
 # The PAT must never appear on a command line that ps/auditd can see.
 # Write it to a file inside the CT with mode 600, then pass the path via env.
 if [[ "$FH_AUTH" == "pat" ]]; then

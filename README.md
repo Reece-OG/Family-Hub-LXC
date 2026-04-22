@@ -194,13 +194,48 @@ pct exec 200 -- systemctl status family-hub
 
 ## Upgrading
 
-Family Hub ships new versions as commits on its `main` branch. Inside the LXC, the bundled helper pulls + rebuilds in place using whichever auth method was configured at install:
+Family Hub ships new versions as commits on its `main` branch. There are two ways to pull them in.
+
+### Option 1 — from inside the app (parents only)
+
+Log in as a parent, open **Settings**, scroll to the **System** card:
+
+- **Check for updates** compares the local `HEAD` with `origin/main` and shows whether a newer commit is available.
+- **Update now** asks for a second confirmation, then pulls + rebuilds + restarts the app. The card shows a live "Updating…" state while the systemd unit is working and flips to "Update successful" or "Update failed" when it finishes. A rebuild usually takes 3-5 minutes on a low-end CT.
+
+A daily background timer also runs the check automatically (with a 1-hour random jitter so every install doesn't hit GitHub at midnight UTC), so the System card is normally already up-to-date when you open Settings.
+
+**How it works under the hood.** The web app runs unprivileged (as `familyhub` in the native install, as the `nextjs` user inside the container in the Docker install), so it can't run `git`, `docker` or `systemctl` directly. Instead it writes a one-byte trigger file into `/var/lib/family-hub/state/`, and a pair of systemd `.path` units on the LXC host fire the privileged `state-helper.sh` in response. The helper runs `git fetch` / `/opt/family-hub/update.sh` as root and writes JSON status files that the app polls.
+
+- `family-hub-check.path`  — watches `check-requested`, runs `state-helper.sh check`
+- `family-hub-update.path` — watches `update-requested`, runs `state-helper.sh update`
+- `family-hub-auto-check.timer` — touches `check-requested` once a day
+
+Useful commands:
 
 ```bash
+# Manual check from the host
+pct exec 200 -- /opt/family-hub/state-helper.sh check
+cat /var/lib/family-hub/state/version.json
+
+# Watch the update log live
+pct exec 200 -- journalctl -u family-hub-update -f
+
+# Disable the daily auto-check if you'd rather drive it manually
+pct exec 200 -- systemctl disable --now family-hub-auto-check.timer
+```
+
+### Option 2 — from the LXC shell
+
+Both methods still ship the classic CLI updater:
+
+```bash
+pct exec 200 -- update
+# or directly:
 pct exec 200 -- /opt/family-hub/update.sh
 ```
 
-This is safe to run while the container is live - Docker Compose recreates only the containers whose images actually changed, and the Postgres volume + uploads volume are unaffected.
+This is the same script the in-app button invokes, and it's safe to run while the container is live — Docker Compose only recreates containers whose images changed, and the Postgres + uploads volumes are unaffected.
 
 ## Troubleshooting
 

@@ -35,6 +35,9 @@ SERVICE_USER="familyhub"
 TOKEN_FILE="/root/.fh-token"
 SYSTEMD_UNIT="/etc/systemd/system/family-hub.service"
 LOG_FILE="/var/log/family-hub-install.log"
+STATE_DIR="/var/lib/family-hub/state"
+STATE_HELPER_SRC="/root/state-helper.sh"
+STATE_HELPER="${INSTALL_DIR}/state-helper.sh"
 
 # ---------- output helpers -----------------------------------------------------
 RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[0;33m'; BLU=$'\033[0;34m'
@@ -463,6 +466,116 @@ SHIM
   chmod 755 /usr/local/bin/update
 }
 
+do_install_update_system() {
+  # The in-app "Check for updates / Update now" feature is a privilege-
+  # separated pipeline:
+  #   web app (familyhub)  --touch-->  trigger file in $STATE_DIR
+  #   systemd path unit (root)         family-hub-{check,update}.path
+  #     -> oneshot service (root)      family-hub-{check,update}.service
+  #     -> state-helper.sh (root)      runs git fetch / update.sh,
+  #                                    writes JSON status files the app reads
+  # A daily timer also touches the trigger file so the UI stays fresh
+  # without any user action.
+
+  # 1. State directory, owned by familyhub:familyhub so the web app can
+  #    create trigger files and read version.json / update-status.json.
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 775 "$STATE_DIR"
+
+  # 2. Move the privileged helper into place.
+  [[ -f "$STATE_HELPER_SRC" ]] || { echo "Missing $STATE_HELPER_SRC (install.sh should have pushed it)." >&2; return 1; }
+  install -o root -g root -m 755 "$STATE_HELPER_SRC" "$STATE_HELPER"
+
+  # 3. systemd path + service pair: check.
+  cat > /etc/systemd/system/family-hub-check.path <<'UNIT'
+[Unit]
+Description=Watch for Family Hub update-check requests
+Documentation=https://github.com/Reece-OG/Family-Hub
+
+[Path]
+# Any touch/create of this file fires the service below.
+PathChanged=/var/lib/family-hub/state/check-requested
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  cat > /etc/systemd/system/family-hub-check.service <<UNIT
+[Unit]
+Description=Check Family Hub for available updates
+Documentation=https://github.com/Reece-OG/Family-Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${STATE_HELPER} check
+# If git fetch is slow, keep going — the helper writes an error.json we'll
+# surface in the UI.
+TimeoutStartSec=120
+UNIT
+
+  # 4. systemd path + service pair: update.
+  cat > /etc/systemd/system/family-hub-update.path <<'UNIT'
+[Unit]
+Description=Watch for Family Hub update requests
+Documentation=https://github.com/Reece-OG/Family-Hub
+
+[Path]
+PathChanged=/var/lib/family-hub/state/update-requested
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  cat > /etc/systemd/system/family-hub-update.service <<UNIT
+[Unit]
+Description=Apply Family Hub update (git pull + rebuild + restart)
+Documentation=https://github.com/Reece-OG/Family-Hub
+After=network-online.target family-hub.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${STATE_HELPER} update
+# A rebuild can take 3-5 minutes on a low-end CT. Give it 15.
+TimeoutStartSec=15min
+UNIT
+
+  # 5. Daily auto-check timer.
+  cat > /etc/systemd/system/family-hub-auto-check.timer <<'UNIT'
+[Unit]
+Description=Daily automatic Family Hub update check
+
+[Timer]
+OnCalendar=daily
+# Spread the load across a 1-hour window so every install doesn't hammer
+# GitHub at midnight UTC.
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+  cat > /etc/systemd/system/family-hub-auto-check.service <<'UNIT'
+[Unit]
+Description=Fire the Family Hub update-check trigger
+
+[Service]
+Type=oneshot
+# Deliberately uses /usr/bin/touch so this unit doesn't need to know where
+# state-helper.sh lives — the path unit watching the trigger file picks up
+# the rest.
+ExecStart=/usr/bin/touch /var/lib/family-hub/state/check-requested
+UNIT
+
+  # Run check once now so the UI has a version.json to read from first boot.
+  "$STATE_HELPER" check >/dev/null 2>&1 || true
+
+  systemctl daemon-reload
+  systemctl enable --now family-hub-check.path family-hub-update.path family-hub-auto-check.timer >/dev/null
+}
+
 do_cleanup_token() {
   [[ "$FH_AUTH" == "pat" && -f "$TOKEN_FILE" ]] || return 0
   shred -u "$TOKEN_FILE" 2>/dev/null || rm -f "$TOKEN_FILE"
@@ -511,6 +624,7 @@ step "Writing systemd unit + starting"       do_write_systemd
 step "Waiting for web app on :3000"          do_wait_for_service
 step "Writing update helper"                 do_write_update_helper
 step "Installing 'update' shortcut"          do_install_update_command
+step "Wiring in-app update flow + daily check" do_install_update_system
 step "Cleaning up transient PAT file"        do_cleanup_token
 step "Enabling unattended security updates"  do_unattended_upgrades
 

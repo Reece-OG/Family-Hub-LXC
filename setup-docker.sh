@@ -26,6 +26,15 @@ FH_AUTH="${FH_AUTH:-public}"
 TIMEZONE="${TIMEZONE:-UTC}"
 INSTALL_DIR="/opt/family-hub"
 TOKEN_FILE="/root/.fh-token"
+STATE_DIR="/var/lib/family-hub/state"
+STATE_HELPER_SRC="/root/state-helper.sh"
+STATE_HELPER="${INSTALL_DIR}/state-helper.sh"
+# The nextjs user baked into web/Dockerfile runs as UID 1001 (GID 1001). The
+# host-side state directory needs those perms so the container can touch the
+# trigger files; the host-side systemd helper runs as root and has no problem
+# reading/writing there regardless.
+NEXTJS_UID=1001
+NEXTJS_GID=1001
 
 # ---------- output helpers -----------------------------------------------------
 RED=$'\033[0;31m'; GRN=$'\033[0;32m'; BLU=$'\033[0;34m'
@@ -161,6 +170,15 @@ else
   ok ".env already exists - leaving it alone."
 fi
 
+# ---------- state dir (pre-mount) ---------------------------------------------
+# docker-compose.yml bind-mounts /var/lib/family-hub/state into the web
+# container. We create it BEFORE `docker compose up` so docker doesn't
+# auto-create it as root:root (which would block the nextjs user inside the
+# container from writing trigger files).
+msg "Creating host state dir at ${STATE_DIR}..."
+install -d -o "$NEXTJS_UID" -g "$NEXTJS_GID" -m 775 "$STATE_DIR"
+ok "State dir ready (owned by UID ${NEXTJS_UID} for container access)."
+
 # ---------- build + start ------------------------------------------------------
 msg "Building + starting Family Hub containers (first run: ~4 minutes)..."
 cd "$INSTALL_DIR"
@@ -194,6 +212,113 @@ echo "Done."
 UPDATE
 chmod +x "$INSTALL_DIR/update.sh"
 ok "Update helper ready: /opt/family-hub/update.sh"
+
+# ---------- in-app update wiring ----------------------------------------------
+# The in-app "Check for updates / Update now" feature is a privilege-separated
+# pipeline (same design as setup-native.sh — only the update.sh body differs):
+#
+#   web container (nextjs, uid 1001) --touch--> trigger file in $STATE_DIR
+#     /var/lib/family-hub/state is bind-mounted from the LXC host.
+#   systemd path unit on the host (root) --> oneshot service (root) -->
+#     state-helper.sh (root) --> git fetch / update.sh,
+#                                writes JSON status files for the app to poll.
+#
+# A daily timer also touches the trigger file so the UI stays fresh without
+# any user action.
+msg "Wiring in-app update flow + daily check..."
+
+[[ -f "$STATE_HELPER_SRC" ]] || die "Missing $STATE_HELPER_SRC - install.sh should have pushed it."
+install -o root -g root -m 755 "$STATE_HELPER_SRC" "$STATE_HELPER"
+
+# 1. Check: path unit watches the trigger file; service runs the helper.
+cat > /etc/systemd/system/family-hub-check.path <<'UNIT'
+[Unit]
+Description=Watch for Family Hub update-check requests
+Documentation=https://github.com/Reece-OG/Family-Hub
+
+[Path]
+PathChanged=/var/lib/family-hub/state/check-requested
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/systemd/system/family-hub-check.service <<UNIT
+[Unit]
+Description=Check Family Hub for available updates
+Documentation=https://github.com/Reece-OG/Family-Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${STATE_HELPER} check
+TimeoutStartSec=120
+UNIT
+
+# 2. Update: path unit watches the trigger file; service runs state-helper,
+#    which shells out to /opt/family-hub/update.sh (the docker updater above).
+cat > /etc/systemd/system/family-hub-update.path <<'UNIT'
+[Unit]
+Description=Watch for Family Hub update requests
+Documentation=https://github.com/Reece-OG/Family-Hub
+
+[Path]
+PathChanged=/var/lib/family-hub/state/update-requested
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/systemd/system/family-hub-update.service <<UNIT
+[Unit]
+Description=Apply Family Hub update (git pull + docker rebuild)
+Documentation=https://github.com/Reece-OG/Family-Hub
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=${STATE_HELPER} update
+# docker compose build can take 3-5 minutes on a low-end CT. Give it 15.
+TimeoutStartSec=15min
+UNIT
+
+# 3. Daily auto-check timer + tiny shim service that just touches the trigger.
+cat > /etc/systemd/system/family-hub-auto-check.timer <<'UNIT'
+[Unit]
+Description=Daily automatic Family Hub update check
+
+[Timer]
+OnCalendar=daily
+# Spread load across a 1-hour window so every install doesn't hammer GitHub
+# at midnight UTC.
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+cat > /etc/systemd/system/family-hub-auto-check.service <<'UNIT'
+[Unit]
+Description=Fire the Family Hub update-check trigger
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/touch /var/lib/family-hub/state/check-requested
+UNIT
+
+# Run one check now so the UI has a version.json to read from first boot.
+"$STATE_HELPER" check >/dev/null 2>&1 || true
+
+systemctl daemon-reload
+systemctl enable --now \
+  family-hub-check.path \
+  family-hub-update.path \
+  family-hub-auto-check.timer >/dev/null
+ok "In-app update flow + daily check enabled."
 
 # ---------- token cleanup ------------------------------------------------------
 # The PAT file we seeded is no longer needed - git has the cred stored now.
