@@ -237,6 +237,16 @@ pct exec 200 -- /opt/family-hub/update.sh
 
 This is the same script the in-app button invokes, and it's safe to run while the container is live — Docker Compose only recreates containers whose images changed, and the Postgres + uploads volumes are unaffected.
 
+### Retrofitting the in-app updater onto an older install
+
+The in-app update card was added in v4.7.2. If your CT was created with a v4.7.1 (or earlier) installer, pulling the new code isn't enough — the host-side bits (state directory, `state-helper.sh`, six systemd units) aren't in the app repo and have to be installed on the CT. Run this once as root inside the CT:
+
+```bash
+pct exec 200 -- bash -c "$(curl -fsSL https://raw.githubusercontent.com/Reece-OG/Family-Hub-LXC/main/migrate-to-4.7.2.sh)"
+```
+
+The script is idempotent — safe to re-run — and auto-detects whether you're on a native or Docker install. After it finishes, reload Settings → System in your browser and the Updates card should light up.
+
 ## Troubleshooting
 
 **Clone fails with `Authentication failed` (PAT mode)**
