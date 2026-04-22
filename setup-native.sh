@@ -417,7 +417,17 @@ set -a
 . "$INSTALL_DIR/.env"
 set +a
 
-do_git_pull()       { sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" pull --ff-only; }
+do_git_pull() {
+  # This box is a *consumer* of the repo, not a dev clone — we intentionally do
+  # not preserve any local work. `git pull --ff-only` used to be enough, but it
+  # breaks after an upstream force-push (diverging history, no FF possible).
+  # Fetch and hard-reset to whatever branch this checkout is already on, which
+  # works across both normal advances and force-pushes.
+  sudo -u "$SERVICE_USER" bash -c "cd '$INSTALL_DIR' && \
+    branch=\$(git rev-parse --abbrev-ref HEAD) && \
+    git fetch --prune origin && \
+    git reset --hard \"origin/\$branch\""
+}
 do_npm_install()    { sudo -u "$SERVICE_USER" bash -lc "cd $WEB_DIR && npm install --no-audit --no-fund --include=dev"; }
 do_prisma_gen()     { sudo -u "$SERVICE_USER" --preserve-env=DATABASE_URL,NODE_ENV bash -lc "cd $WEB_DIR && npx prisma generate >/dev/null"; }
 do_prisma_push()    { sudo -u "$SERVICE_USER" --preserve-env=DATABASE_URL,NODE_ENV bash -lc "cd $WEB_DIR && npx prisma db push --skip-generate"; }

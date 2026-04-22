@@ -200,10 +200,18 @@ cat > "$INSTALL_DIR/update.sh" <<'UPDATE'
 #!/usr/bin/env bash
 # Pull the latest commit on the current branch and rebuild Family Hub in place.
 # Uses the credential store / deploy key that the installer left on disk.
+#
+# This box is a *consumer* of the repo, not a dev clone — we intentionally do
+# not preserve any local work. `git pull --ff-only` used to be enough, but it
+# breaks after an upstream force-push (diverging history, no FF possible).
+# Fetch and hard-reset to whatever branch this checkout is already on, which
+# works across both normal advances and force-pushes.
 set -euo pipefail
 cd /opt/family-hub
-echo "==> git pull"
-git pull --ff-only
+echo "==> git fetch + reset to origin"
+branch=$(git rev-parse --abbrev-ref HEAD)
+git fetch --prune origin
+git reset --hard "origin/${branch}"
 echo "==> docker compose build"
 docker compose build
 echo "==> docker compose up -d"
