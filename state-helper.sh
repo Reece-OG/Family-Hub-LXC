@@ -42,15 +42,14 @@ chmod 775 "$STATE_DIR"
 # Git 2.35+ refuses to operate on repos it doesn't think belong to the invoking
 # user unless the path is in safe.directory. On native installs /opt/family-hub
 # is chown'd to familyhub but we run here as root, so git's rev-parse / fetch
-# would fail with "detected dubious ownership" — which state-helper then
-# surfaces as a misleading "not a git checkout" error. Mark the install dir
-# safe for root, idempotently (don't grow the config with duplicates).
-if [[ -d "${INSTALL_DIR}/.git" ]]; then
-  if ! git config --global --get-all safe.directory 2>/dev/null \
-      | grep -qxF "$INSTALL_DIR"; then
-    git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
-  fi
-fi
+# would fail with "detected dubious ownership" — which we were misreporting as
+# "not a git checkout". We pass safe.directory per-invocation via `-c` rather
+# than relying on a $HOME/.gitconfig write (which is fragile under systemd
+# service contexts that may not have a persistent HOME for root), so every git
+# call in this script goes through this wrapper.
+git_inst() {
+  git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" "$@"
+}
 
 # --- Small JSON-writer helpers ------------------------------------------------
 # We avoid taking a hard dep on jq: the only user-controlled strings we ever
@@ -89,7 +88,7 @@ cmd_check() {
   local err=""
   local branch local_sha remote_sha commits_behind pkg_version
 
-  if ! branch="$(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
+  if ! branch="$(git_inst rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
     err="not a git checkout at $INSTALL_DIR"
     branch="main"
   fi
@@ -97,18 +96,18 @@ cmd_check() {
   # Fetch without pulling. Credential store at /root/.git-credentials or the
   # deploy key at /root/.ssh/id_ed25519 is picked up automatically for root.
   if [[ -z "$err" ]]; then
-    if ! git -C "$INSTALL_DIR" fetch --quiet origin "$branch" 2>>"$UPDATE_LOG"; then
+    if ! git_inst fetch --quiet origin "$branch" 2>>"$UPDATE_LOG"; then
       err="git fetch failed (see $UPDATE_LOG)"
     fi
   fi
 
-  local_sha="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo '')"
+  local_sha="$(git_inst rev-parse HEAD 2>/dev/null || echo '')"
   remote_sha=""
   commits_behind=0
   if [[ -z "$err" ]]; then
-    remote_sha="$(git -C "$INSTALL_DIR" rev-parse "origin/${branch}" 2>/dev/null || echo '')"
+    remote_sha="$(git_inst rev-parse "origin/${branch}" 2>/dev/null || echo '')"
     if [[ -n "$local_sha" ]] && [[ -n "$remote_sha" ]]; then
-      commits_behind="$(git -C "$INSTALL_DIR" rev-list --count "HEAD..origin/${branch}" 2>/dev/null || echo 0)"
+      commits_behind="$(git_inst rev-list --count "HEAD..origin/${branch}" 2>/dev/null || echo 0)"
     fi
   fi
 
