@@ -247,6 +247,8 @@ pct exec 200 -- bash -c "$(curl -fsSL https://raw.githubusercontent.com/Reece-OG
 
 The script is idempotent — safe to re-run — and auto-detects whether you're on a native or Docker install. After it finishes, reload Settings → System in your browser and the Updates card should light up.
 
+> **If your in-app update fails with `cannot open '.git/FETCH_HEAD': Permission denied`,** re-run the migration command above. The fix lives in `state-helper.sh` (run git as the repo owner instead of root, and reclaim any root-owned files in `.git`); re-running migrate pulls the new helper, repoints the systemd units at it, and restores ownership in one pass. After it finishes hit **Settings → Check for updates → Update now** and the rebuild should complete.
+
 ## Troubleshooting
 
 **Clone fails with `Authentication failed` (PAT mode)**

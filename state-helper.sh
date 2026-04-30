@@ -39,16 +39,43 @@ mkdir -p "$STATE_DIR"
 chgrp "$SERVICE_USER" "$STATE_DIR" 2>/dev/null || true
 chmod 775 "$STATE_DIR"
 
-# Git 2.35+ refuses to operate on repos it doesn't think belong to the invoking
-# user unless the path is in safe.directory. On native installs /opt/family-hub
-# is chown'd to familyhub but we run here as root, so git's rev-parse / fetch
-# would fail with "detected dubious ownership" — which we were misreporting as
-# "not a git checkout". We pass safe.directory per-invocation via `-c` rather
-# than relying on a $HOME/.gitconfig write (which is fragile under systemd
-# service contexts that may not have a persistent HOME for root), so every git
-# call in this script goes through this wrapper.
+# v4.7.5 — every git command in this script runs as the repo OWNER, not as
+# root. Earlier versions ran git as root with safe.directory=$INSTALL_DIR to
+# bypass Git 2.35+'s dubious-ownership check, but that left root-owned
+# writes inside .git (most visibly .git/FETCH_HEAD). The next time
+# update.sh's `do_git_pull` ran as the service user it would fail with
+# "cannot open '.git/FETCH_HEAD': Permission denied".
+#
+# Resolving the owner from the .git directory itself works for both the
+# native install (familyhub) and the docker host (root) without hard-coding
+# either. If the repo isn't a git checkout yet (fresh clone halted), we
+# fall back to root + safe.directory so cmd_check can still emit a
+# meaningful version.json error.
+GIT_RUN_AS_USER=""
+if [[ -d "${INSTALL_DIR}/.git" ]]; then
+  GIT_RUN_AS_USER="$(stat -c '%U' "${INSTALL_DIR}/.git" 2>/dev/null || true)"
+  if [[ "$GIT_RUN_AS_USER" == "root" ]]; then
+    GIT_RUN_AS_USER=""
+  fi
+fi
+
+# Reclaim any files that prior root-as-git invocations left behind in .git.
+# Cheap and idempotent: chown -R only writes when a row's owner differs.
+# Without this, a CT that ran on an older state-helper still has root-owned
+# FETCH_HEAD / refs from before the upgrade and update.sh would keep
+# bouncing off the same permission error.
+fix_git_ownership() {
+  if [[ -n "$GIT_RUN_AS_USER" ]] && [[ -d "${INSTALL_DIR}/.git" ]]; then
+    chown -R "${GIT_RUN_AS_USER}:${GIT_RUN_AS_USER}" "${INSTALL_DIR}/.git" 2>/dev/null || true
+  fi
+}
+
 git_inst() {
-  git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" "$@"
+  if [[ -n "$GIT_RUN_AS_USER" ]]; then
+    sudo -u "$GIT_RUN_AS_USER" -- git -C "$INSTALL_DIR" "$@"
+  else
+    git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" "$@"
+  fi
 }
 
 # --- Small JSON-writer helpers ------------------------------------------------
@@ -87,6 +114,11 @@ cmd_check() {
   started="$(now_iso)"
   local err=""
   local branch local_sha remote_sha commits_behind pkg_version
+
+  # First-thing: reclaim any root-owned .git artefacts a prior version of
+  # this helper may have left behind, so the about-to-run fetch (as the
+  # repo owner) can write FETCH_HEAD without bouncing off EACCES.
+  fix_git_ownership
 
   if ! branch="$(git_inst rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
     err="not a git checkout at $INSTALL_DIR"
@@ -146,6 +178,11 @@ JSON
 cmd_update() {
   local started
   started="$(now_iso)"
+
+  # Same defensive ownership reclaim as cmd_check — update.sh will run git
+  # as the service user and fall over if root-owned files are still in .git.
+  fix_git_ownership
+
   write_file_atomic "$UPDATE_STATUS_FILE" <<JSON
 {"state":"running","startedAt":"${started}","finishedAt":null,"error":null}
 JSON
