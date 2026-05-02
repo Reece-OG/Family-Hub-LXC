@@ -249,6 +249,18 @@ The script is idempotent — safe to re-run — and auto-detects whether you're 
 
 > **If your in-app update fails with `cannot open '.git/FETCH_HEAD': Permission denied`,** re-run the migration command above. The fix lives in `state-helper.sh` (run git as the repo owner instead of root, and reclaim any root-owned files in `.git`); re-running migrate pulls the new helper, repoints the systemd units at it, and restores ownership in one pass. After it finishes hit **Settings → Check for updates → Update now** and the rebuild should complete.
 
+> **If your in-app update fails with `Not possible to fast-forward, aborting`,** your `/opt/family-hub/update.sh` is the pre-v4.7.2 version that uses `git pull --ff-only` and can't survive an upstream force-push. Recovery is two commands on the CT, then re-run migrate to make it permanent:
+>
+> ```bash
+> # 1. Sync /opt/family-hub to whatever's on the remote (handles divergence)
+> pct exec <ctid> -- bash -c "cd /opt/family-hub && sudo -u familyhub git fetch --prune origin && sudo -u familyhub git reset --hard origin/main"
+>
+> # 2. Re-run migrate to patch update.sh in place (idempotent)
+> pct exec <ctid> -- bash -c "$(curl -fsSL https://raw.githubusercontent.com/Reece-OG/Family-Hub-LXC/main/migrate-to-4.7.2.sh)"
+> ```
+>
+> After step 2 the migration script rewrites `update.sh` so the `git pull --ff-only` line becomes `git fetch --prune origin && git reset --hard origin/main`, matching what fresh installs get. Future force-pushed releases won't trip the in-app updater.
+
 ## Troubleshooting
 
 **Clone fails with `Authentication failed` (PAT mode)**

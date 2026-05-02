@@ -216,6 +216,25 @@ if [[ "$METHOD" == "docker" ]]; then
   fi
 fi
 
+# ---------- patch update.sh (v4.7.11+) ---------------------------------------
+# Older installs (pre-v4.7.2) wrote /opt/family-hub/update.sh with
+# `git pull --ff-only`, which breaks whenever upstream history is
+# force-pushed (and our snapshot-folder workflow does that whenever a
+# .git folder is re-initialised). Replace any surviving `git pull
+# --ff-only` invocation with the `git fetch + git reset --hard` pattern
+# we ship in fresh installs since v4.7.2. Idempotent — the regex no-ops
+# when the script has already been patched.
+if [[ -f "$INSTALL_DIR/update.sh" ]]; then
+  if grep -q "git pull --ff-only" "$INSTALL_DIR/update.sh"; then
+    msg "Patching $INSTALL_DIR/update.sh to use git fetch + reset (force-push safe)..."
+    sed -i \
+      -e 's|git pull --ff-only origin main|git fetch --prune origin \&\& git reset --hard origin/main|g' \
+      -e 's|git pull --ff-only|git fetch --prune origin \&\& git reset --hard origin/main|g' \
+      "$INSTALL_DIR/update.sh"
+    ok "update.sh patched"
+  fi
+fi
+
 # ---------- prime version.json -----------------------------------------------
 msg "Running initial version check to populate version.json..."
 if "$STATE_HELPER" check >/dev/null 2>&1; then
